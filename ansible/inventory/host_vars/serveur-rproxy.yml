@@ -1,0 +1,16 @@
+---
+# host_vars/serveur-rproxy.yml
+# Variables spécifiques à serveur-rproxy.
+
+# ── Identité réseau ────────────────────────────────────────────────────────────
+rproxy_ip: "192.168.103.60"
+
+# ── Application cible ─────────────────────────────────────────────────────────
+# Traefik proxifie vers serveur-app sur ce port.
+app_ip:   "192.168.102.62"
+app_port: "80"
+
+# ── FreeIPA (pour Authelia) ────────────────────────────────────────────────────
+# Repris depuis group_vars/all/main.yml mais explicité ici pour lisibilité.
+# ipa_ip et domain_name sont déjà définis dans group_vars — pas besoin de les
+# redéclarer, ils sont accessibles directement dans les templates.

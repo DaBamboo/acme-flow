@@ -1,0 +1,47 @@
+# /opt/rproxy/traefik/traefik.yml
+# Configuration STATIQUE Traefik — générée par Ansible
+# Nécessite un redémarrage du conteneur pour être prise en compte.
+
+# ── Entrypoints ────────────────────────────────────────────────────────────────
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  # Toutes les requêtes HTTP sont redirigées vers HTTPS.
+
+  websecure:
+    address: ":443"
+
+# ── Provider fichier (config dynamique) ───────────────────────────────────────
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+    # Traefik surveille le répertoire dynamic/ et recharge à chaud
+    # les routes sans redémarrage.
+
+# ── TLS par défaut ────────────────────────────────────────────────────────────
+tls:
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /certs/acme.lan.crt
+        keyFile: /certs/acme.lan.key
+
+# ── Dashboard (accès local uniquement) ────────────────────────────────────────
+api:
+  dashboard: true
+  insecure: true
+  # Dashboard accessible sur http://serveur-rproxy:8080
+  # insecure=true : pas de TLS sur le dashboard (usage interne uniquement).
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+log:
+  level: INFO
+
+accessLog: {}

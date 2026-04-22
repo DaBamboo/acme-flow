@@ -1,0 +1,49 @@
+---
+# /opt/rproxy/docker-compose.yml
+# Stack reverse proxy ACME — générée par Ansible
+# Contient : Traefik (reverse proxy TLS) + Authelia (authentification SSO)
+
+services:
+
+  traefik:
+    image: traefik:v3.1
+    container_name: traefik
+    restart: unless-stopped
+    ports:
+      - "80:80"       # HTTP → redirigé vers HTTPS par Traefik
+      - "443:443"     # HTTPS
+      - "127.0.0.1:8080:8080"   # Dashboard (local uniquement, non exposé)
+    volumes:
+      - /opt/rproxy/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - /opt/rproxy/traefik/dynamic:/etc/traefik/dynamic:ro
+      - /opt/rproxy/traefik/certs:/certs:ro
+    networks:
+      - proxy
+    extra_hosts:
+      # Résolution de serveur-app depuis le conteneur Traefik
+      - "serveur-app:{{ app_ip }}"
+    depends_on:
+      - authelia
+
+  authelia:
+    image: authelia/authelia:latest
+    container_name: authelia
+    restart: unless-stopped
+    expose:
+      - "9091"
+      # Port interne uniquement — pas exposé à l'extérieur.
+      # Traefik communique avec Authelia via le réseau Docker "proxy".
+    volumes:
+      - /opt/rproxy/authelia:/config
+    networks:
+      - proxy
+    environment:
+      - TZ=Europe/Paris
+    extra_hosts:
+      # Authelia doit pouvoir joindre FreeIPA pour les requêtes LDAPS
+      - "serveur-ipa.acme.lan:{{ ipa_ip }}"
+
+networks:
+  proxy:
+    name: proxy
+    driver: bridge

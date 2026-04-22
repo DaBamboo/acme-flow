@@ -1,0 +1,85 @@
+---
+# /opt/rproxy/authelia/configuration.yml
+# Configuration Authelia — générée par Ansible
+# Ce fichier contient des secrets → mode 600, ne pas commiter en clair.
+
+# ── Identité du serveur ────────────────────────────────────────────────────────
+server:
+  address: "tcp://0.0.0.0:9091"
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+log:
+  level: info
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+# Clé de signature des tokens JWT (sessions web)
+jwt_secret: "{{ vault_authelia_jwt_secret }}"
+
+# ── URL de base ───────────────────────────────────────────────────────────────
+default_redirection_url: "https://flow.acme.lan"
+
+# ── Authentification LDAP (FreeIPA) ──────────────────────────────────────────
+authentication_backend:
+  ldap:
+    implementation: custom
+    address: "ldaps://{{ ipa_ip }}:636"
+    tls:
+      skip_verify: true
+      # skip_verify=true car le certificat FreeIPA est auto-signé.
+      # Pour un environnement de production, importer le CA IPA et passer
+      # skip_verify à false avec le chemin du CA en certificate_chain_file.
+    base_dn: "dc={{ domain_name.split('.')[0] }},dc={{ domain_name.split('.')[1] }}"
+    # → dc=acme,dc=lan
+
+    # Compte de service pour les recherches LDAP
+    user: "uid=svc-authelia,cn=users,cn=accounts,dc={{ domain_name.split('.')[0] }},dc={{ domain_name.split('.')[1] }}"
+    password: "{{ vault_svc_authelia_password }}"
+
+    # Structure FreeIPA : les users sont dans cn=users,cn=accounts,dc=acme,dc=lan
+    additional_users_dn: "cn=users,cn=accounts"
+    users_filter: "(&({username_attribute}={input})(objectClass=person))"
+    username_attribute: uid
+    mail_attribute: mail
+    display_name_attribute: displayName
+
+    # Structure FreeIPA : les groupes sont dans cn=groups,cn=accounts,dc=acme,dc=lan
+    additional_groups_dn: "cn=groups,cn=accounts"
+    groups_filter: "(&(member={dn})(objectClass=groupofnames))"
+    group_name_attribute: cn
+
+# ── Politique d'accès ─────────────────────────────────────────────────────────
+access_control:
+  default_policy: deny
+  # Par défaut tout est refusé — on ouvre explicitement ce qu'on veut.
+
+  rules:
+    - domain: "flow.acme.lan"
+      policy: one_factor
+      # Un seul facteur (login/mdp LDAP) pour accéder à l'application.
+      # Pour ajouter le TOTP plus tard : changer en two_factor.
+
+# ── Sessions ──────────────────────────────────────────────────────────────────
+session:
+  name: authelia_session
+  secret: "{{ vault_authelia_session_secret }}"
+  expiration: 3600      # 1h d'inactivité → déconnexion
+  remember_me: 604800   # "Se souvenir de moi" → 7 jours
+  cookies:
+    - domain: "acme.lan"
+      authelia_url: "https://flow.acme.lan/authelia"
+      default_redirection_url: "https://flow.acme.lan"
+
+# ── Stockage (SQLite) ─────────────────────────────────────────────────────────
+storage:
+  encryption_key: "{{ vault_authelia_storage_key }}"
+  local:
+    path: /config/db.sqlite3
+  # SQLite est suffisant pour un usage mono-instance.
+  # Pour un cluster multi-instances, utiliser PostgreSQL ou MySQL.
+
+# ── Notifications (désactivées, filesystem) ───────────────────────────────────
+notifier:
+  filesystem:
+    filename: /config/notifications.log
+  # En production, configurer un serveur SMTP ici pour les mails de reset.
+  # Pour la démo : les notifications sont loguées dans un fichier.

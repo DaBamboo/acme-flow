@@ -1,0 +1,73 @@
+# /opt/rproxy/traefik/dynamic/routes.yml
+# Configuration DYNAMIQUE Traefik — générée par Ansible
+# Rechargée à chaud par Traefik (pas besoin de redémarrer).
+
+# ── Middlewares ────────────────────────────────────────────────────────────────
+http:
+  middlewares:
+
+    authelia:
+      # Forward Auth : Traefik demande à Authelia si la requête est autorisée.
+      # Si Authelia répond 200 → la requête passe.
+      # Si Authelia répond 401 → redirect vers la page de login.
+      forwardAuth:
+        address: "http://authelia:9091/api/authz/forward-auth"
+        trustForwardHeader: true
+        authResponseHeaders:
+          - "Remote-User"
+          - "Remote-Groups"
+          - "Remote-Name"
+          - "Remote-Email"
+        # Ces headers sont injectés dans la requête vers l'app après auth réussie.
+        # L'application peut les lire pour savoir qui est connecté.
+
+    security-headers:
+      # Headers de sécurité HTTP recommandés
+      headers:
+        stsSeconds: 31536000          # HSTS 1 an
+        stsIncludeSubdomains: true
+        forceSTSHeader: true
+        contentTypeNosniff: true
+        browserXssFilter: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+
+  # ── Routers ─────────────────────────────────────────────────────────────────
+  routers:
+
+    flow-app:
+      rule: "Host(`flow.acme.lan`)"
+      entryPoints:
+        - websecure
+      middlewares:
+        - authelia
+        - security-headers
+      service: flow-app
+      tls: {}
+      # tls: {} → utilise le certificat par défaut déclaré dans traefik.yml
+
+    authelia-route:
+      # Route directe vers Authelia pour le portail de login.
+      # PAS de middleware authelia ici (sinon boucle infinie).
+      rule: "Host(`flow.acme.lan`) && PathPrefix(`/authelia`)"
+      entryPoints:
+        - websecure
+      service: authelia-svc
+      tls: {}
+      priority: 10
+      # Priorité plus haute que flow-app pour que /authelia soit intercepté avant.
+
+  # ── Services ─────────────────────────────────────────────────────────────────
+  services:
+
+    flow-app:
+      loadBalancer:
+        servers:
+          - url: "http://{{ app_ip }}:{{ app_port }}"
+        # Traefik proxifie vers serveur-app directement via son IP.
+        # serveur-app n'est PAS exposé sur internet — seul Traefik peut l'atteindre.
+        passHostHeader: true
+
+    authelia-svc:
+      loadBalancer:
+        servers:
+          - url: "http://authelia:9091"

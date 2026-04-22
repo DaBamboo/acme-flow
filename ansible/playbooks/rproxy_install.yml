@@ -1,0 +1,233 @@
+---
+# playbooks/rproxy_install.yml
+#
+# Playbook de déploiement du reverse proxy pour le projet ACME.
+# Déploie Traefik + Authelia sur serveur-rproxy via Docker Compose.
+#
+# PRÉREQUIS :
+#   1. FreeIPA opérationnel sur serveur-ipa (playbook ipa_install.yml exécuté)
+#   2. Le vault contient vault_authelia_jwt_secret, vault_authelia_session_secret,
+#      vault_authelia_storage_key et vault_svc_authelia_password
+#   3. serveur-rproxy joignable en SSH depuis serveur-admin
+#
+# EXÉCUTION :
+#   ansible-playbook -i inventory/hosts.yml playbooks/rproxy_install.yml \
+#     --vault-password-file .vault_pass
+#
+# CE QUE CE PLAYBOOK FAIT, dans l'ordre :
+#   Play 1 — Préparer le système      : Docker, firewalld, répertoires
+#   Play 2 — Générer le certificat    : Certificat TLS auto-signé *.acme.lan
+#   Play 3 — Déployer Traefik         : Reverse proxy HTTPS
+#   Play 4 — Déployer Authelia        : Authentification SSO via FreeIPA LDAP
+#   Play 5 — Démarrer la stack        : Docker Compose up
+#
+# ARCHITECTURE :
+#   Internet → Traefik:443 → [Authelia forward-auth] → serveur-app:80
+#                                      │
+#                              FreeIPA LDAPS:636
+#                              (vérification credentials)
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  PLAY 1 : PRÉPARATION SYSTÈME                                               ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+- name: "Play 1 — Préparer le système"
+  hosts: rproxy_servers
+  gather_facts: true
+  become: true
+
+  tasks:
+
+    # ── 1.1 Docker ────────────────────────────────────────────────────────────
+    - name: "1.1 | Installer les dépendances Docker"
+      ansible.builtin.dnf:
+        name:
+          - dnf-plugins-core
+          - python3-pip
+        state: present
+
+    - name: "1.1 | Ajouter le dépôt Docker officiel"
+      ansible.builtin.yum_repository:
+        name: docker-ce
+        description: Docker CE Stable
+        baseurl: "https://download.docker.com/linux/fedora/$releasever/$basearch/stable"
+        gpgcheck: true
+        gpgkey: "https://download.docker.com/linux/fedora/gpg"
+        enabled: true
+
+    - name: "1.1 | Installer Docker CE"
+      ansible.builtin.dnf:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        state: present
+
+    - name: "1.1 | Activer et démarrer Docker"
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: "1.1 | Installer le module Python docker (pour Ansible)"
+      ansible.builtin.pip:
+        name: docker
+        state: present
+
+    # ── 1.2 Firewalld ─────────────────────────────────────────────────────────
+    - name: "1.2 | Ouvrir le port HTTPS (443)"
+      ansible.posix.firewalld:
+        service: https
+        permanent: true
+        state: enabled
+        immediate: true
+
+    - name: "1.2 | Ouvrir le port HTTP (80) pour redirect → HTTPS"
+      ansible.posix.firewalld:
+        service: http
+        permanent: true
+        state: enabled
+        immediate: true
+
+    # ── 1.3 Répertoires de travail ────────────────────────────────────────────
+    - name: "1.3 | Créer l'arborescence /opt/rproxy"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+      loop:
+        - /opt/rproxy
+        - /opt/rproxy/traefik
+        - /opt/rproxy/traefik/dynamic
+        - /opt/rproxy/traefik/certs
+        - /opt/rproxy/authelia
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  PLAY 2 : CERTIFICAT TLS AUTO-SIGNÉ                                         ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+- name: "Play 2 — Générer le certificat TLS auto-signé *.acme.lan"
+  hosts: rproxy_servers
+  gather_facts: false
+  become: true
+
+  tasks:
+
+    - name: "2.1 | Générer la clé privée"
+      ansible.builtin.command:
+        cmd: >
+          openssl genrsa -out /opt/rproxy/traefik/certs/acme.lan.key 4096
+        creates: /opt/rproxy/traefik/certs/acme.lan.key
+
+    - name: "2.2 | Générer le certificat auto-signé wildcard (*.acme.lan)"
+      ansible.builtin.command:
+        cmd: >
+          openssl req -new -x509
+          -key /opt/rproxy/traefik/certs/acme.lan.key
+          -out /opt/rproxy/traefik/certs/acme.lan.crt
+          -days 3650
+          -subj "/C=FR/O=ACME Corp/CN=*.acme.lan"
+          -addext "subjectAltName=DNS:*.acme.lan,DNS:acme.lan"
+        creates: /opt/rproxy/traefik/certs/acme.lan.crt
+      # Le certificat couvre *.acme.lan → valable pour flow.acme.lan,
+      # serveur-ipa.acme.lan, et tout autre sous-domaine futur.
+
+    - name: "2.3 | Protéger la clé privée"
+      ansible.builtin.file:
+        path: /opt/rproxy/traefik/certs/acme.lan.key
+        mode: "0600"
+        owner: root
+        group: root
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  PLAY 3 : CONFIGURATION TRAEFIK                                             ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+- name: "Play 3 — Configurer Traefik"
+  hosts: rproxy_servers
+  gather_facts: false
+  become: true
+
+  tasks:
+
+    - name: "3.1 | Déployer la configuration statique Traefik"
+      ansible.builtin.template:
+        src: templates/traefik_static.yml.j2
+        dest: /opt/rproxy/traefik/traefik.yml
+        mode: "0640"
+      # Config statique : entrypoints, providers, logs
+
+    - name: "3.2 | Déployer la configuration dynamique (routes + middlewares)"
+      ansible.builtin.template:
+        src: templates/traefik_dynamic.yml.j2
+        dest: /opt/rproxy/traefik/dynamic/routes.yml
+        mode: "0640"
+      # Config dynamique : routers, services, middleware forward-auth Authelia
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  PLAY 4 : CONFIGURATION AUTHELIA                                            ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+- name: "Play 4 — Configurer Authelia"
+  hosts: rproxy_servers
+  gather_facts: false
+  become: true
+
+  tasks:
+
+    - name: "4.1 | Déployer la configuration Authelia"
+      ansible.builtin.template:
+        src: templates/authelia_config.yml.j2
+        dest: /opt/rproxy/authelia/configuration.yml
+        mode: "0600"
+      # Mode 600 : contient le mot de passe du compte de service LDAP
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  PLAY 5 : DOCKER COMPOSE                                                    ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+- name: "Play 5 — Déployer et démarrer la stack Docker"
+  hosts: rproxy_servers
+  gather_facts: false
+  become: true
+
+  tasks:
+
+    - name: "5.1 | Déployer le fichier docker-compose.yml"
+      ansible.builtin.template:
+        src: templates/docker_compose_rproxy.yml.j2
+        dest: /opt/rproxy/docker-compose.yml
+        mode: "0640"
+
+    - name: "5.2 | Lancer la stack (Traefik + Authelia)"
+      community.docker.docker_compose_v2:
+        project_src: /opt/rproxy
+        state: present
+        pull: always
+      register: compose_result
+
+    - name: "5.3 | Attendre que Traefik soit disponible (port 443)"
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 443
+        timeout: 60
+
+    - name: "5.4 | Attendre que Authelia soit disponible (port 9091)"
+      ansible.builtin.wait_for:
+        host: "127.0.0.1"
+        port: 9091
+        timeout: 60
+
+    - name: "5.5 | Résumé du déploiement"
+      ansible.builtin.debug:
+        msg:
+          - "═══════════════════════════════════════════════════"
+          - "  Reverse proxy déployé avec succès"
+          - "═══════════════════════════════════════════════════"
+          - "  Application  : https://flow.acme.lan"
+          - "  Auth portal  : https://flow.acme.lan/authelia"
+          - "  Traefik dash : http://{{ ansible_host }}:8080 (local uniquement)"
+          - "═══════════════════════════════════════════════════"
+          - "  ⚠  Le certificat est auto-signé : accepter l'exception"
+          - "     dans le navigateur ou importer le CA sur les clients."
+          - "  ⚠  Ajouter dans /etc/hosts des clients :"
+          - "     {{ rproxy_ip }}  flow.acme.lan"
+          - "═══════════════════════════════════════════════════"
