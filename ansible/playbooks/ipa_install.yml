@@ -301,8 +301,7 @@
       freeipa.ansible_freeipa.ipagroup:
         ipaadmin_password: "{{ ipaadmin_password }}"
         name:    "{{ item.groups | first }}"    # chaque user n'a qu'un groupe principal
-        members:
-          user: ["{{ item.login }}"]
+        user: ["{{ item.login }}"]
         action: member
         state: present
       loop: "{{ ipa_demo_users | selectattr('groups', 'defined') | list }}"
