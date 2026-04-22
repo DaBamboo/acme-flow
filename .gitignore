@@ -1,5 +1,8 @@
-*.retry
+# Ne jamais commiter ces fichiers
 .vault_pass
-**/secrets/*.yml
-!**/secrets/*.example.yml
-.env
+*.log
+*.retry
+
+# Le vault en clair — on commite uniquement la version chiffrée
+# (si tu veux commiter vault.yml chiffré, retire cette ligne)
+# group_vars/all/vault.yml
