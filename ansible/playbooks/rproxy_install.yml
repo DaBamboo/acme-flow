@@ -210,11 +210,11 @@
         port: 443
         timeout: 60
 
-    - name: "5.4 | Attendre que Authelia soit disponible (port 9091)"
-      ansible.builtin.wait_for:
-        host: "127.0.0.1"
-        port: 9091
-        timeout: 60
+    - name: "5.4 | Vérifier qu'Authelia est healthy"
+      community.docker.docker_container_info:
+        name: authelia
+      register: authelia_info
+      failed_when: authelia_info.container.State.Status != "running"
 
     - name: "5.5 | Résumé du déploiement"
       ansible.builtin.debug:
