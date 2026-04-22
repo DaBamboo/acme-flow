@@ -1,0 +1,32 @@
+# /etc/chrony.conf — template Ansible
+# Généré par playbooks/ipa_install.yml pour {{ inventory_hostname }}
+
+# Serveurs NTP upstream
+# Après l'installation de FreeIPA, les autres VMs pointeront sur serveur-ipa.
+# serveur-ipa lui-même pointe sur des serveurs publics.
+{% for server in ntp_servers %}
+server {{ server }} iburst
+{% endfor %}
+
+# Fichier de dérive : chrony enregistre la dérive de l'horloge pour compenser
+# au démarrage suivant, même sans réseau immédiatement disponible.
+driftfile /var/lib/chrony/drift
+
+# Autoriser la mise à l'heure en grand saut au démarrage uniquement
+# (utile si la VM a été éteinte longtemps — évite le refus de synchro si
+# la dérive est trop grande)
+makestep 1.0 3
+
+# Activer le compteur de cycles hardware si disponible (précision)
+rtcsync
+
+# Fichier de clé (non utilisé ici, authentication NTP désactivée pour simplifier)
+# keyfile /etc/chrony.keys
+
+# Sécurité : n'accepter les requêtes NTP entrantes QUE depuis le réseau local.
+# Cela permet à serveur-ipa d'être utilisé comme serveur NTP par les autres VMs.
+allow 192.168.0.0/16
+
+# Logging
+logdir /var/log/chrony
+log measurements statistics tracking

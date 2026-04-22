@@ -1,0 +1,108 @@
+---
+# host_vars/serveur-ipa.yml
+#
+# Variables spécifiques à serveur-ipa.
+# Ce fichier contient la configuration complète du serveur FreeIPA.
+# Les mots de passe sont référencés depuis vault.yml (ansible-vault).
+
+# ── Identité réseau de la VM ────────────────────────────────────────────────────
+# FreeIPA EXIGE que le hostname soit un FQDN (Fully Qualified Domain Name).
+# Un hostname court type "serveur-ipa" fait échouer l'installation.
+ipa_hostname: "serveur-ipa.acme.lan"
+ipa_ip:       "192.168.102.10"
+
+# ── Configuration du domaine FreeIPA ───────────────────────────────────────────
+ipa_domain: "{{ domain_name }}"   # acme.lan — zone DNS que FreeIPA va gérer
+ipa_realm:  "{{ realm_name }}"    # ACME.LAN — realm Kerberos
+
+# ── Mots de passe (définis dans vault.yml, référencés ici) ────────────────────
+# vault_ipa_admin_password     : mot de passe du compte "admin" FreeIPA (interface web + kinit)
+# vault_ipa_dm_password        : mot de passe Directory Manager (accès direct LDAP, DSRM-like)
+# vault_svc_authelia_password  : mot de passe du compte de service pour Authelia
+
+ipa_admin_password: "{{ vault_ipa_admin_password }}"
+ipa_dm_password:    "{{ vault_ipa_dm_password }}"
+
+# ── DNS intégré ─────────────────────────────────────────────────────────────────
+# FreeIPA embarque un serveur BIND. On l'active pour que les VMs du domaine
+# puissent résoudre *.acme.lan via l'annuaire plutôt qu'un DNS externe.
+ipa_setup_dns:    true
+ipa_auto_forwarders: false      # on déclare les forwarders manuellement (plus sûr)
+ipa_forwarders: "{{ dns_forwarders }}"
+
+# ── NTP intégré ─────────────────────────────────────────────────────────────────
+# FreeIPA peut servir de serveur NTP (via chronyd).
+# Une fois installé, les autres VMs pointeront sur serveur-ipa comme NTP.
+ipa_setup_ntp: true
+ipa_ntp_servers: "{{ ntp_servers }}"
+
+# ── Algorithme de hachage des certificats ──────────────────────────────────────
+# SHA256 est le minimum recommandé. MD5/SHA1 sont dépréciés.
+ipa_dirsrv_cert_subject: "CN=Certificate Authority,O={{ ipa_realm }}"
+
+# ── Ports firewalld ouverts par le playbook ────────────────────────────────────
+# Liste des services firewalld que FreeIPA nécessite.
+# Chaque service correspond à un ou plusieurs ports/protocoles.
+ipa_firewall_services:
+  - freeipa-ldap      # LDAP 389/tcp (annuaire non chiffré, utilisé en interne)
+  - freeipa-ldaps     # LDAPS 636/tcp (annuaire chiffré — utilisé par Authelia)
+  - kerberos          # Kerberos 88/tcp+udp, 464/tcp+udp (auth tickets)
+  - dns               # DNS 53/tcp+udp (résolution interne)
+  - ntp               # NTP 123/udp (sync horloge)
+  - freeipa-replication  # 7389/tcp (si on ajoute un replica plus tard)
+  - http              # 80/tcp (redirect vers 443, portail web IPA)
+  - https             # 443/tcp (portail web IPA)
+
+# ── Structure métier à créer après installation ────────────────────────────────
+
+# Organisation Unit racine pour les objets métier
+ipa_ou_name: "ACME"
+ipa_ou_description: "Utilisateurs et groupes métier ACME Corp"
+
+# Groupes (correspondent aux rôles applicatifs)
+ipa_groups:
+  - name: acme-users
+    description: "Demandeurs — accès en lecture/écriture sur leurs propres données"
+  - name: acme-approvers
+    description: "Approbateurs — peuvent valider ou rejeter les demandes"
+  - name: acme-admins
+    description: "Administrateurs — accès complet + administration infra"
+
+# Utilisateurs de démo
+# IMPORTANT : password_expiration = true → le mot de passe expirera au premier login.
+# Pour la démo jury, on peut le désactiver (first_time_login = false).
+ipa_demo_users:
+  - login: alice
+    first: Alice
+    last: Demo
+    email: alice@acme.lan
+    password: "DemoAlice2025!"
+    groups: [acme-users]
+  - login: bob
+    first: Bob
+    last: Demo
+    email: bob@acme.lan
+    password: "DemoBob2025!"
+    groups: [acme-users]
+  - login: charlie
+    first: Charlie
+    last: Demo
+    email: charlie@acme.lan
+    password: "DemoCharlie2025!"
+    groups: [acme-approvers]
+  - login: diane
+    first: Diane
+    last: Demo
+    email: diane@acme.lan
+    password: "DemoDiane2025!"
+    groups: [acme-admins]
+
+# Compte de service pour Authelia (bind LDAPS)
+# Ne jamais expirer, pas d'accès SSH, droits lecture seule sur l'annuaire
+ipa_service_accounts:
+  - login: svc-authelia
+    first: Authelia
+    last: "Service"
+    email: svc-authelia@acme.lan
+    password: "{{ vault_svc_authelia_password }}"
+    groups: []     # Aucun groupe métier — juste le droit de faire des recherches LDAP

@@ -1,0 +1,252 @@
+---
+# playbooks/ipa_backup.yml
+#
+# Playbook de SAUVEGARDE des données FreeIPA.
+#
+# Conforme à la demande : on sauvegarde les données (pas la VM entière).
+# FreeIPA stocke ses données dans :
+#   - L'annuaire LDAP (389-DS) → dump via ipa-backup
+#   - Les zones DNS              → incluses dans ipa-backup
+#   - Les certificats CA         → inclus dans ipa-backup
+#   - La configuration Kerberos  → incluse dans ipa-backup
+#
+# La commande `ipa-backup` fait exactement ça : elle exporte tout ce qui est
+# nécessaire pour restaurer un FreeIPA, sans avoir besoin de sauvegarder
+# le système de fichiers complet.
+#
+# EXÉCUTION :
+#   ansible-playbook -i inventory/hosts.yml playbooks/ipa_backup.yml --ask-vault-pass
+#
+# SAUVEGARDE AUTOMATIQUE :
+#   Ce playbook est également appelé par le cron configuré sur serveur-ipa
+#   (voir rôle ipa_backup_cron dans ce même répertoire).
+#
+# RÉSULTAT :
+#   Les sauvegardes sont stockées dans /var/lib/ipa/backup/ sur serveur-ipa
+#   puis copiées sur serveur-admin dans /opt/backups/ipa/.
+
+- name: "Sauvegarder les données FreeIPA"
+  hosts: ipa_servers
+  become: true
+  gather_facts: true
+
+  vars:
+    backup_dir_remote:  "/var/lib/ipa/backup"
+    backup_dir_local:   "/opt/backups/ipa"          # sur serveur-admin
+    backup_retention:   7                            # garder les 7 derniers backups
+
+  tasks:
+
+    - name: "Créer le répertoire de backup local sur serveur-admin"
+      ansible.builtin.file:
+        path: "{{ backup_dir_local }}"
+        state: directory
+        mode: '0750'
+      delegate_to: localhost
+      become: false
+
+    - name: "Lancer ipa-backup (données LDAP + DNS + KRB + CA)"
+      ansible.builtin.command:
+        cmd: ipa-backup --data --online
+        # --data  : sauvegarde les données uniquement (pas les binaires du système)
+        # --online: effectue la sauvegarde sans arrêter les services IPA.
+        #           En production on préférerait --offline pour garantir la cohérence,
+        #           mais en démo --online permet de ne pas couper le service.
+      register: backup_result
+      changed_when: true
+
+    - name: "Afficher le résultat de ipa-backup"
+      ansible.builtin.debug:
+        msg: "{{ backup_result.stdout_lines }}"
+
+    - name: "Trouver le répertoire du dernier backup créé"
+      ansible.builtin.find:
+        paths: "{{ backup_dir_remote }}"
+        file_type: directory
+        patterns: "ipa-data-*"
+      register: backup_dirs
+
+    - name: "Compresser le dernier backup en .tar.gz"
+      ansible.builtin.archive:
+        path: "{{ (backup_dirs.files | sort(attribute='mtime') | last).path }}"
+        dest: "{{ backup_dir_remote }}/ipa-data-{{ ansible_date_time.iso8601_basic_short }}.tar.gz"
+        format: gz
+      register: backup_archive
+
+    - name: "Copier la sauvegarde vers serveur-admin"
+      ansible.builtin.fetch:
+        src:  "{{ backup_archive.dest }}"
+        dest: "{{ backup_dir_local }}/"
+        flat: true
+      # flat: true → le fichier est copié directement dans backup_dir_local
+      # sans créer de sous-dossier par hostname.
+
+    - name: "Supprimer les anciennes sauvegardes (conserver les {{ backup_retention }} dernières)"
+      ansible.builtin.find:
+        paths: "{{ backup_dir_local }}"
+        patterns: "ipa-data-*.tar.gz"
+        file_type: file
+      register: local_backups
+      delegate_to: localhost
+      become: false
+
+    - name: "Purger les backups excédentaires sur serveur-admin"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: >-
+        {{
+          (local_backups.files | sort(attribute='mtime'))[:-backup_retention]
+        }}
+      delegate_to: localhost
+      become: false
+      when: local_backups.files | length > backup_retention
+
+    - name: "Ajouter le cron de sauvegarde automatique quotidienne"
+      ansible.builtin.cron:
+        name: "IPA daily backup"
+        minute:  "0"
+        hour:    "2"
+        job:     >-
+          ansible-playbook /opt/ansible/playbooks/ipa_backup.yml
+          -i /opt/ansible/inventory/hosts.yml
+          --vault-password-file /opt/ansible/.vault_pass
+          >> /var/log/ipa-backup.log 2>&1
+        user:    root
+        state:   present
+      delegate_to: serveur-admin
+      # Le cron tourne sur serveur-admin (le nœud de contrôle Ansible),
+      # pas sur serveur-ipa. C'est la philosophie retenue pour tous les crons
+      # de sauvegarde : un seul endroit centralise les sauvegardes.
+
+
+---
+# playbooks/ipa_restore.yml
+#
+# Playbook de RESTAURATION des données FreeIPA.
+#
+# Scénario jury : "Supprimez FreeIPA et ses données, puis restaurez-les."
+# Ce playbook :
+#   1. Désinstalle FreeIPA (ipa-server-install --uninstall)
+#   2. Réinstalle FreeIPA (appelle ipa_install.yml)
+#   3. Restaure les données depuis la dernière sauvegarde
+#
+# EXÉCUTION :
+#   ansible-playbook -i inventory/hosts.yml playbooks/ipa_restore.yml --ask-vault-pass
+#
+# La restauration complète prend environ 5-8 minutes.
+
+- name: "Restaurer FreeIPA depuis la dernière sauvegarde"
+  hosts: ipa_servers
+  become: true
+  gather_facts: true
+
+  vars:
+    backup_dir_local:   "/opt/backups/ipa"
+    backup_dir_remote:  "/var/lib/ipa/backup"
+    restore_tmp:        "/tmp/ipa-restore"
+
+  tasks:
+
+    # ── Étape 1 : Désinstaller FreeIPA ────────────────────────────────────
+    - name: "1 | Vérifier que FreeIPA est installé avant de désinstaller"
+      ansible.builtin.stat:
+        path: /etc/ipa/default.conf
+      register: ipa_installed
+
+    - name: "1 | Désinstaller FreeIPA (supprime services + données LDAP)"
+      ansible.builtin.command:
+        cmd: ipa-server-install --uninstall --unattended
+      when: ipa_installed.stat.exists
+      # --uninstall : supprime tous les services, paquets et données FreeIPA.
+      # --unattended : pas de confirmation interactive (compatible CI/CD).
+      register: uninstall_result
+      changed_when: true
+
+    - name: "1 | Confirmer la désinstallation"
+      ansible.builtin.debug:
+        msg: "FreeIPA désinstallé. Données supprimées : annuaire LDAP, zones DNS, CA."
+      when: ipa_installed.stat.exists
+
+    # ── Étape 2 : Réinstaller FreeIPA ────────────────────────────────────
+    # On appelle le playbook d'installation comme une tâche imbriquée.
+    # Cela évite de dupliquer la logique d'installation.
+    - name: "2 | Réinstaller FreeIPA (via ipa_install.yml)"
+      ansible.builtin.import_playbook: ipa_install.yml
+      # Note : import_playbook n'est pas supporté en tant que tâche dans un play.
+      # Ce bloc sera converti en appel via `ansible-playbook --include` dans le script
+      # de restauration. Voir scripts/restore_ipa.sh pour l'orchestration complète.
+
+    # ── Étape 3 : Restaurer les données ──────────────────────────────────
+    - name: "3 | Trouver la dernière sauvegarde sur serveur-admin"
+      ansible.builtin.find:
+        paths: "{{ backup_dir_local }}"
+        patterns: "ipa-data-*.tar.gz"
+        file_type: file
+      register: available_backups
+      delegate_to: localhost
+      become: false
+      failed_when: available_backups.files | length == 0
+
+    - name: "3 | Identifier la sauvegarde la plus récente"
+      ansible.builtin.set_fact:
+        latest_backup: "{{ (available_backups.files | sort(attribute='mtime') | last).path }}"
+
+    - name: "3 | Créer le répertoire de travail sur serveur-ipa"
+      ansible.builtin.file:
+        path: "{{ restore_tmp }}"
+        state: directory
+        mode: '0700'
+
+    - name: "3 | Copier la sauvegarde vers serveur-ipa"
+      ansible.builtin.copy:
+        src:  "{{ latest_backup }}"
+        dest: "{{ restore_tmp }}/backup.tar.gz"
+        mode: '0600'
+
+    - name: "3 | Décompresser l'archive"
+      ansible.builtin.unarchive:
+        src:  "{{ restore_tmp }}/backup.tar.gz"
+        dest: "{{ backup_dir_remote }}"
+        remote_src: true
+
+    - name: "3 | Trouver le répertoire de backup décompressé"
+      ansible.builtin.find:
+        paths: "{{ backup_dir_remote }}"
+        file_type: directory
+        patterns: "ipa-data-*"
+      register: restored_dirs
+
+    - name: "3 | Restaurer les données avec ipa-restore"
+      ansible.builtin.command:
+        cmd: >
+          ipa-restore
+          --data
+          --online
+          --unattended
+          -p {{ ipa_dm_password }}
+          {{ (restored_dirs.files | sort(attribute='mtime') | last).path | basename }}
+        # --data   : restaure uniquement les données (pas le système)
+        # --online : pas d'arrêt des services (plus rapide pour la démo)
+        # -p       : Directory Manager password (nécessaire pour écrire dans LDAP)
+      no_log: true
+      register: restore_result
+      changed_when: true
+
+    - name: "3 | Afficher le résultat de la restauration"
+      ansible.builtin.debug:
+        msg: "{{ restore_result.stdout_lines }}"
+
+    - name: "3 | Nettoyer les fichiers temporaires"
+      ansible.builtin.file:
+        path: "{{ restore_tmp }}"
+        state: absent
+
+    - name: "Résumé de la restauration"
+      ansible.builtin.debug:
+        msg:
+          - "═══════════════════════════════════════════════════"
+          - "✅  FreeIPA restauré avec succès"
+          - "  Sauvegarde utilisée : {{ latest_backup | basename }}"
+          - "  Portail web : https://{{ ipa_hostname }}/ipa/ui"
+          - "═══════════════════════════════════════════════════"

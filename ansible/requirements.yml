@@ -1,0 +1,16 @@
+---
+# Fichier de dépendances Ansible Collections
+#
+# À exécuter UNE SEULE FOIS depuis serveur-admin avant de lancer les playbooks :
+#   ansible-galaxy collection install -r requirements.yml
+#
+# ansible-freeipa est la collection officielle maintenue par Red Hat.
+# Elle fournit des modules idempotents (ipaserver, ipauser, ipagroup...)
+# qui permettent de relancer le playbook sans tout réinstaller.
+
+collections:
+  - name: freeipa.ansible_freeipa
+    version: ">=1.13.0"
+
+  - name: community.general
+    version: ">=9.0.0"

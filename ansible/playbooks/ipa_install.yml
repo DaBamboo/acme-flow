@@ -1,0 +1,409 @@
+---
+# playbooks/ipa_install.yml
+#
+# Playbook d'installation et de configuration de FreeIPA sur serveur-ipa.
+#
+# PRÉREQUIS avant d'exécuter ce playbook :
+#   1. ansible-galaxy collection install -r requirements.yml
+#   2. Le vault est créé et chiffré : ansible-vault encrypt group_vars/all/vault.yml
+#   3. serveur-ipa est joignable en SSH depuis serveur-admin (clé déployée)
+#
+# EXÉCUTION :
+#   ansible-playbook -i inventory/hosts.yml playbooks/ipa_install.yml --ask-vault-pass
+#
+# CE QUE CE PLAYBOOK FAIT, dans l'ordre :
+#   Play 1 — Préparation système
+#             Prépare les prérequis qu'IPA exige avant son installation.
+#   Play 2 — Installation FreeIPA
+#             Installe et configure le serveur IPA (LDAP, Kerberos, DNS, CA, NTP).
+#   Play 3 — Configuration post-installation
+#             Crée la structure métier : OU, groupes, users, compte de service.
+#
+# IDEMPOTENCE :
+#   Ce playbook peut être relancé sans casser ce qui est déjà en place.
+#   L'installation FreeIPA est protégée par un check sur le marqueur /etc/ipa/default.conf.
+#   Les tâches de structure (groupes, users) utilisent les modules ansible-freeipa
+#   qui appliquent un "state: present" idempotent.
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  PLAY 1 : PRÉPARATION SYSTÈME                                               ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+- name: "Play 1 — Préparer le système pour FreeIPA"
+  hosts: ipa_servers
+  gather_facts: true
+  become: true
+
+  tasks:
+
+    # ── 1.1 Hostname ─────────────────────────────────────────────────────────
+    # FreeIPA EXIGE un FQDN en hostname. Si le hostname est "serveur-ipa" sans
+    # domaine, l'installateur échoue avec "Hostname 'serveur-ipa' is not a FQDN".
+    # On configure les deux : le hostname kernel ET le hostname "pretty" systemd.
+    - name: "1.1 | Définir le hostname FQDN (obligatoire pour FreeIPA)"
+      ansible.builtin.hostname:
+        name: "{{ ipa_hostname }}"
+        use: systemd
+      # Résultat attendu : `hostname -f` retourne serveur-ipa.acme.lan
+
+    # ── 1.2 /etc/hosts ───────────────────────────────────────────────────────
+    # FreeIPA résout son propre hostname via /etc/hosts pendant l'installation
+    # (avant même que son propre serveur DNS soit actif). Si cette entrée est
+    # absente ou incorrecte, l'installation échoue au moment de la création
+    # du certificat Kerberos.
+    - name: "1.2 | Ajouter l'entrée de serveur-ipa dans /etc/hosts"
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: "^{{ ipa_ip }}\\s"
+        line: "{{ ipa_ip }} {{ ipa_hostname }} serveur-ipa"
+        state: present
+      # Résultat attendu : la ligne "192.168.102.10 serveur-ipa.acme.lan serveur-ipa"
+      # est présente dans /etc/hosts.
+
+    - name: "1.2b | S'assurer que 127.0.0.1 ne pointe PAS sur le FQDN"
+      # Si 127.0.0.1 est mappé sur le FQDN, IPA se lie sur loopback et
+      # les autres VMs ne peuvent pas le joindre.
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: "^127\\.0\\.0\\.1.*{{ ipa_hostname }}"
+        state: absent
+
+    # ── 1.3 Paquets système ──────────────────────────────────────────────────
+    # Mise à jour de la liste des paquets, puis installation de :
+    # - chrony    : démon NTP (synchronisation horaire). Kerberos refuse une
+    #               dérive > 5 min. Sur Fedora, chrony remplace ntp.
+    # - firewalld : gestionnaire de firewall. FreeIPA l'utilise pour ouvrir ses
+    #               ports automatiquement. Il doit être présent et actif.
+    # - oddjob + oddjob-mkhomedir : permet la création automatique du home des
+    #               users FreeIPA lors de leur première connexion SSH sur une VM jointe.
+    # - ipa-server-dns : méta-paquet qui tire freeipa-server + BIND + les modules DNS.
+    #               On l'installe manuellement ici pour séparer le téléchargement
+    #               (lent, ~200 Mo) du reste de la configuration.
+    - name: "1.3 | Mettre à jour les métadonnées dnf"
+      ansible.builtin.dnf:
+        update_cache: true
+
+    - name: "1.3 | Installer les prérequis système"
+      ansible.builtin.dnf:
+        name:
+          - chrony                  # Synchronisation NTP
+          - firewalld               # Gestionnaire de firewall
+          - oddjob                  # Démon de tâches (nécessaire pour mkhomedir)
+          - oddjob-mkhomedir        # Création auto du home directory
+          - ipa-server              # FreeIPA server core
+          - ipa-server-dns          # Extension DNS (BIND intégré)
+          - python3-gssapi          # Nécessaire pour l'authentification Kerberos dans Ansible
+        state: present
+
+    # ── 1.4 Synchronisation NTP ─────────────────────────────────────────────
+    # On configure chrony pour synchroniser sur les serveurs publics définis
+    # dans group_vars. Plus tard (post-IPA), les autres VMs pointeront sur
+    # serveur-ipa lui-même.
+    - name: "1.4 | Configurer chrony avec les serveurs NTP"
+      ansible.builtin.template:
+        src: templates/chrony.conf.j2
+        dest: /etc/chrony.conf
+        owner: root
+        group: root
+        mode: '0644'
+        backup: true       # garde l'ancien fichier si on veut rollback
+      notify: Restart chrony
+
+    - name: "1.4 | Activer et démarrer chronyd"
+      ansible.builtin.systemd:
+        name: chronyd
+        enabled: true
+        state: started
+
+    - name: "1.4 | Attendre que chrony soit synchronisé (max 60s)"
+      # Kerberos refuse de démarrer si l'horloge est hors-sync.
+      # On attend explicitement la synchronisation avant de continuer.
+      ansible.builtin.command: chronyc waitsync 12 0.1
+      # chronyc waitsync <tentatives> <offset_max_en_secondes>
+      # 12 tentatives × 5s = 60s max. Offset acceptable : 0.1 seconde.
+      changed_when: false
+      register: chrony_sync
+      failed_when: chrony_sync.rc != 0
+
+    # ── 1.5 Firewalld ────────────────────────────────────────────────────────
+    # Firewalld doit tourner avant l'installation FreeIPA : l'installateur y
+    # ajoute lui-même les règles nécessaires. On le démarre maintenant pour
+    # être sûr qu'il est actif.
+    - name: "1.5 | Activer et démarrer firewalld"
+      ansible.builtin.systemd:
+        name: firewalld
+        enabled: true
+        state: started
+
+    # ── 1.6 SELinux ──────────────────────────────────────────────────────────
+    # FreeIPA REQUIERT SELinux en mode enforcing. Sur Fedora, il est activé par
+    # défaut, mais on le vérifie explicitement et on échoue proprement si ce
+    # n'est pas le cas (plutôt que d'avoir une erreur mystérieuse 30 min plus tard).
+    - name: "1.6 | Vérifier que SELinux est en mode enforcing"
+      ansible.builtin.assert:
+        that:
+          - ansible_selinux.status == 'enabled'
+          - ansible_selinux.mode   == 'enforcing'
+        fail_msg: |
+          SELinux n'est pas en mode 'enforcing' sur {{ inventory_hostname }}.
+          FreeIPA requiert SELinux enforcing pour fonctionner.
+          Activer SELinux et redémarrer la VM avant de relancer ce playbook.
+        success_msg: "SELinux est en mode enforcing. OK."
+
+  handlers:
+    - name: Restart chrony
+      ansible.builtin.systemd:
+        name: chronyd
+        state: restarted
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  PLAY 2 : INSTALLATION FREEIPA SERVER                                       ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+- name: "Play 2 — Installer et configurer FreeIPA server"
+  hosts: ipa_servers
+  become: true
+
+  # Le rôle ipaserver est fourni par la collection freeipa.ansible_freeipa.
+  # Il encapsule toute la logique de ipa-server-install en modules idempotents.
+  roles:
+    - role: freeipa.ansible_freeipa.ipaserver
+      vars:
+
+        # ── Identité du serveur ───────────────────────────────────────────────
+        # ipaserver_domain et ipaserver_realm doivent correspondre exactement
+        # aux variables définies plus haut.
+        ipaserver_domain: "{{ ipa_domain }}"
+        ipaserver_realm:  "{{ ipa_realm }}"
+        ipaserver_hostname: "{{ ipa_hostname }}"
+
+        # ── Mots de passe ─────────────────────────────────────────────────────
+        # ipaadmin_password : compte admin FreeIPA (interface web, kinit)
+        # ipadm_password    : Directory Manager (accès LDAP bas niveau)
+        ipaadmin_password: "{{ ipa_admin_password }}"
+        ipadm_password:    "{{ ipa_dm_password }}"
+
+        # ── DNS intégré ───────────────────────────────────────────────────────
+        # ipaserver_setup_dns = true → installe et configure BIND comme DNS
+        # autoritaire pour ipaserver_domain.
+        # Cela signifie que toutes les VMs du domaine résoudront *.acme.lan
+        # via ce serveur, et que FreeIPA y enregistre automatiquement les
+        # SRV records pour Kerberos, LDAP, etc.
+        ipaserver_setup_dns:      "{{ ipa_setup_dns }}"
+        ipaserver_auto_forwarders: false
+        ipaserver_forwarders:      "{{ ipa_forwarders }}"
+        ipaserver_auto_reverse:    true   # crée automatiquement la zone reverse DNS
+        ipaserver_allow_zone_overlap: false
+
+        # ── NTP intégré ───────────────────────────────────────────────────────
+        # FreeIPA peut gérer la synchronisation NTP du domaine.
+        # Une fois IPA installé, les autres VMs pointeront sur lui.
+        ipaserver_setup_ntp:  "{{ ipa_setup_ntp }}"
+        ipaserver_ntp_servers: "{{ ipa_ntp_servers }}"
+
+        # ── Firewall ──────────────────────────────────────────────────────────
+        # Le rôle ouvre automatiquement les ports firewalld nécessaires.
+        ipaserver_setup_firewalld: true
+
+        # ── CA interne ────────────────────────────────────────────────────────
+        # FreeIPA installe une PKI interne (Dogtag) qui va :
+        # - Émettre le certificat TLS du portail web IPA
+        # - Émettre les certificats des services Kerberos
+        # - Permettre d'émettre des certificats pour d'autres services du domaine
+        # On ne touche pas à ces options pour l'instant (defaults suffisants).
+
+        # ── Options diverses ──────────────────────────────────────────────────
+        ipaserver_no_host_dns: false
+        # false = IPA vérifie que son propre hostname est résolvable par DNS.
+        # Ce check passe car /etc/hosts a été configuré en Play 1.
+
+        ipaserver_idstart: 50000
+        # Premier UID/GID pour les users FreeIPA. On part de 50000 pour ne pas
+        # entrer en conflit avec les UIDs système (1-999) et les UIDs locaux
+        # (1000-49999) sur les VMs jointes au domaine.
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  PLAY 3 : CONFIGURATION POST-INSTALLATION                                   ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+- name: "Play 3 — Configurer la structure métier (OU, groupes, utilisateurs)"
+  hosts: ipa_servers
+  become: true
+  # Ce play utilise les modules ansible-freeipa (ipagroup, ipauser) qui
+  # communiquent avec l'API JSON de FreeIPA — pas avec LDAP directement.
+  # Ils s'authentifient avec le compte admin configuré dans ipaadmin_password.
+
+  vars:
+    ipaadmin_password: "{{ ipa_admin_password }}"
+
+  tasks:
+
+    # ── 3.1 Attendre que FreeIPA soit complètement démarré ──────────────────
+    # L'installation du play 2 démarre les services FreeIPA, mais ils peuvent
+    # prendre quelques secondes pour être pleinement opérationnels.
+    - name: "3.1 | Attendre que l'API FreeIPA soit disponible"
+      ansible.builtin.wait_for:
+        host: "{{ ipa_ip }}"
+        port: 443
+        timeout: 120
+        delay: 10
+      delegate_to: localhost
+      # On délègue à localhost (= serveur-admin) car on teste la joignabilité
+      # externe, pas depuis la VM elle-même.
+
+    - name: "3.1 | Pause de 10s pour laisser les services LDAP/Kerberos s'initialiser"
+      ansible.builtin.pause:
+        seconds: 10
+
+    # ── 3.2 Créer les groupes métier ─────────────────────────────────────────
+    # Les groupes définis dans ipa_groups (host_vars/serveur-ipa.yml) sont créés
+    # s'ils n'existent pas, laissés intacts s'ils existent déjà (idempotence).
+    #
+    # Ces groupes correspondent directement aux rôles applicatifs :
+    # - acme-users     → utilisateurs standard de l'app
+    # - acme-approvers → valideurs (file d'attente d'approbation)
+    # - acme-admins    → administrateurs système + app
+    - name: "3.2 | Créer les groupes métier ACME"
+      freeipa.ansible_freeipa.ipagroup:
+        ipaadmin_password: "{{ ipaadmin_password }}"
+        name:        "{{ item.name }}"
+        description: "{{ item.description }}"
+        state: present
+      loop: "{{ ipa_groups }}"
+      # Résultat : les groupes acme-users, acme-approvers, acme-admins existent dans IPA.
+
+    # ── 3.3 Créer les utilisateurs de démo ──────────────────────────────────
+    # Chaque user est créé avec :
+    # - Un mot de passe initial (à changer à la première connexion)
+    # - Une appartenance directe à son groupe métier
+    # - update_password: on_create → Ansible ne touche plus au mot de passe
+    #   si l'user existe déjà (évite de forcer un reset à chaque run du playbook)
+    - name: "3.3 | Créer les utilisateurs de démo"
+      freeipa.ansible_freeipa.ipauser:
+        ipaadmin_password: "{{ ipaadmin_password }}"
+        name:        "{{ item.login }}"
+        first:       "{{ item.first }}"
+        last:        "{{ item.last }}"
+        email:       "{{ item.email }}"
+        password:    "{{ item.password }}"
+        update_password: on_create
+        # on_create = le mot de passe n'est envoyé que lors de la création.
+        # Si l'user existe déjà, son mot de passe n'est PAS modifié.
+        state: present
+      loop: "{{ ipa_demo_users }}"
+      no_log: true
+      # no_log: true → les mots de passe n'apparaissent pas dans les logs Ansible.
+
+    # ── 3.4 Affecter les utilisateurs à leurs groupes ───────────────────────
+    # On ajoute les users à leur groupe en une passe distincte pour bénéficier
+    # de l'idempotence du module ipagroup (state: members_present ne retire pas
+    # les autres membres déjà présents).
+    - name: "3.4 | Affecter les utilisateurs à leurs groupes"
+      freeipa.ansible_freeipa.ipagroup:
+        ipaadmin_password: "{{ ipaadmin_password }}"
+        name:    "{{ item.groups | first }}"    # chaque user n'a qu'un groupe principal
+        members:
+          user: ["{{ item.login }}"]
+        action: member
+        state: present
+      loop: "{{ ipa_demo_users | selectattr('groups', 'defined') | list }}"
+      # Boucle uniquement sur les users qui ont au moins un groupe défini.
+
+    # ── 3.5 Créer le compte de service Authelia ──────────────────────────────
+    # Ce compte est utilisé par Authelia pour faire ses recherches LDAP.
+    # Authelia a besoin de pouvoir lire l'annuaire pour vérifier les credentials
+    # et récupérer les groupes d'appartenance d'un utilisateur.
+    #
+    # Caractéristiques :
+    # - Pas d'expiration de mot de passe (ne doit jamais expirer)
+    # - Pas d'appartenance à des groupes métier
+    # - shell /sbin/nologin pour bloquer tout login interactif
+    - name: "3.5 | Créer le compte de service pour Authelia"
+      freeipa.ansible_freeipa.ipauser:
+        ipaadmin_password: "{{ ipaadmin_password }}"
+        name:         svc-authelia
+        first:        "Authelia"
+        last:         "Service"
+        email:        "svc-authelia@{{ ipa_domain }}"
+        password:     "{{ vault_svc_authelia_password }}"
+        update_password: on_create
+        loginshell:   /sbin/nologin
+        # nologin = ce compte ne peut pas ouvrir de session interactive.
+        # Si quelqu'un récupère ses credentials, il ne peut pas faire
+        # `su svc-authelia` ou s'y connecter en SSH.
+        state: present
+      no_log: true
+
+    # ── 3.6 HBAC — Restreindre l'accès SSH ───────────────────────────────────
+    # HBAC = Host-Based Access Control. FreeIPA a par défaut une règle
+    # "allow_all" qui autorise tout utilisateur du domaine à se connecter
+    # sur n'importe quelle machine jointe.
+    # On la remplace par une règle restrictive : seul acme-admins peut faire SSH.
+    - name: "3.6 | Désactiver la règle HBAC permissive par défaut"
+      freeipa.ansible_freeipa.ipahbacrule:
+        ipaadmin_password: "{{ ipaadmin_password }}"
+        name: allow_all
+        state: disabled
+      # La règle "allow_all" est créée par défaut par FreeIPA.
+      # Elle est désactivée ici, pas supprimée, pour pouvoir être réactivée
+      # en urgence si besoin (ansible-playbook avec state: enabled).
+
+    - name: "3.6 | Créer la règle HBAC : seuls les admins peuvent faire SSH"
+      freeipa.ansible_freeipa.ipahbacrule:
+        ipaadmin_password: "{{ ipaadmin_password }}"
+        name:        admins-ssh-all-hosts
+        description: "Autorise SSH uniquement pour le groupe acme-admins"
+        usercategory: ""    # pas de wildcard utilisateur
+        hostcategory:  all  # sur tous les hôtes du domaine
+        state: present
+
+    - name: "3.6 | Ajouter les services SSH à la règle HBAC"
+      freeipa.ansible_freeipa.ipahbacrule:
+        ipaadmin_password: "{{ ipaadmin_password }}"
+        name: admins-ssh-all-hosts
+        hbacsvc:
+          - sshd
+        action: member
+        state: present
+
+    - name: "3.6 | Ajouter le groupe acme-admins à la règle HBAC"
+      freeipa.ansible_freeipa.ipahbacrule:
+        ipaadmin_password: "{{ ipaadmin_password }}"
+        name: admins-ssh-all-hosts
+        group:
+          - acme-admins
+        action: member
+        state: present
+
+    # ── 3.7 Politique de mots de passe ───────────────────────────────────────
+    # FreeIPA a une politique de mots de passe globale (global_policy).
+    # On la renforce légèrement pour un usage entreprise :
+    - name: "3.7 | Configurer la politique de mots de passe"
+      freeipa.ansible_freeipa.ipapwpolicy:
+        ipaadmin_password: "{{ ipaadmin_password }}"
+        minlength:   10    # Minimum 10 caractères
+        minclasses:   3    # Minimum 3 catégories (maj, min, chiffre, spécial)
+        maxlife:    180    # Expiration tous les 180 jours
+        minlife:      1    # Pas de changement immédiatement après un changement (anti-bypass)
+        history:      5    # On ne peut pas réutiliser les 5 derniers mots de passe
+        maxfail:      5    # Verrouillage après 5 échecs consécutifs
+        failinterval: 120  # Fenêtre de comptage des échecs : 120 secondes
+        lockouttime:  300  # Durée de verrouillage : 5 minutes
+        state: present
+
+    # ── 3.8 Afficher le résumé ───────────────────────────────────────────────
+    - name: "3.8 | Résumé de l'installation"
+      ansible.builtin.debug:
+        msg:
+          - "═══════════════════════════════════════════════════"
+          - "✅  FreeIPA installé et configuré avec succès"
+          - "═══════════════════════════════════════════════════"
+          - "  Portail web   : https://{{ ipa_hostname }}/ipa/ui"
+          - "  Admin CLI     : ssh {{ ipa_hostname }} && kinit admin"
+          - "  Domaine       : {{ ipa_domain }}"
+          - "  Realm         : {{ ipa_realm }}"
+          - "  Users créés   : alice, bob, charlie, diane, svc-authelia"
+          - "  Groupes créés : acme-users, acme-approvers, acme-admins"
+          - "═══════════════════════════════════════════════════"
+          - "  ⚠  Importer le certificat CA IPA sur les clients :"
+          - "     ansible-playbook playbooks/ipa_client_cert.yml"
+          - "═══════════════════════════════════════════════════"

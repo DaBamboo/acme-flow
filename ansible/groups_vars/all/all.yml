@@ -1,0 +1,26 @@
+---
+# group_vars/all.yml
+#
+# Variables partagées par tous les hôtes.
+# Les valeurs sensibles (mots de passe) sont gérées dans vault.yml.
+# Ne JAMAIS mettre de secrets en clair ici.
+
+# ── Domaine interne ────────────────────────────────────────────────────────────
+domain_name: "acme.lan"
+realm_name:  "ACME.LAN"       # Realm Kerberos = domaine en MAJUSCULES, convention RFC
+
+# ── Réseau ─────────────────────────────────────────────────────────────────────
+dns_server_ip: "192.168.102.10"    # IP de serveur-ipa (DNS autoritaire pour acme.lan)
+dns_forwarders:
+  - "9.9.9.9"
+  - "1.1.1.1"
+
+# ── NTP ────────────────────────────────────────────────────────────────────────
+# Kerberos (utilisé par FreeIPA) casse si les horloges dérivent de plus de 5 min.
+# On pointe sur un pool public ; une fois IPA installé, les autres VMs pointeront
+# sur serveur-ipa (qui devient serveur NTP pour le domaine).
+ntp_servers:
+  - "0.fr.pool.ntp.org"
+  - "1.fr.pool.ntp.org"
+  - "2.fr.pool.ntp.org"
+  - "3.fr.pool.ntp.org"
