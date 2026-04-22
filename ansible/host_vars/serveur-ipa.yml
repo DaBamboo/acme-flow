@@ -9,7 +9,7 @@
 # FreeIPA EXIGE que le hostname soit un FQDN (Fully Qualified Domain Name).
 # Un hostname court type "serveur-ipa" fait échouer l'installation.
 ipa_hostname: "serveur-ipa.acme.lan"
-ipa_ip:       "192.168.102.10"
+ipa_ip:       "192.168.102.60"
 
 # ── Configuration du domaine FreeIPA ───────────────────────────────────────────
 ipa_domain: "{{ domain_name }}"   # acme.lan — zone DNS que FreeIPA va gérer

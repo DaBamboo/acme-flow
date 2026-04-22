@@ -246,7 +246,7 @@
       ansible.builtin.debug:
         msg:
           - "═══════════════════════════════════════════════════"
-          - "✅  FreeIPA restauré avec succès"
+          - "  FreeIPA restauré avec succès"
           - "  Sauvegarde utilisée : {{ latest_backup | basename }}"
           - "  Portail web : https://{{ ipa_hostname }}/ipa/ui"
           - "═══════════════════════════════════════════════════"

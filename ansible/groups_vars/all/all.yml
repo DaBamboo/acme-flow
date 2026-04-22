@@ -10,9 +10,9 @@ domain_name: "acme.lan"
 realm_name:  "ACME.LAN"       # Realm Kerberos = domaine en MAJUSCULES, convention RFC
 
 # ── Réseau ─────────────────────────────────────────────────────────────────────
-dns_server_ip: "192.168.102.10"    # IP de serveur-ipa (DNS autoritaire pour acme.lan)
+dns_server_ip: "192.168.102.60"    # IP de serveur-ipa (DNS autoritaire pour acme.lan)
 dns_forwarders:
-  - "9.9.9.9"
+  - "8.8.8.8"
   - "1.1.1.1"
 
 # ── NTP ────────────────────────────────────────────────────────────────────────

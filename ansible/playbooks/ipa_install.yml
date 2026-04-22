@@ -395,7 +395,7 @@
       ansible.builtin.debug:
         msg:
           - "═══════════════════════════════════════════════════"
-          - "✅  FreeIPA installé et configuré avec succès"
+          - "  FreeIPA installé et configuré avec succès"
           - "═══════════════════════════════════════════════════"
           - "  Portail web   : https://{{ ipa_hostname }}/ipa/ui"
           - "  Admin CLI     : ssh {{ ipa_hostname }} && kinit admin"
