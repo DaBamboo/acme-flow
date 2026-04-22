@@ -35,7 +35,7 @@ http:
   routers:
 
     flow-app:
-      rule: "Host(`flow.acme.lan`) \&\& !PathPrefix(`/authelia`)"
+      rule: "Host(`flow.acme.lan`) && !PathPrefix(`/authelia`)"
       entryPoints:
         - websecure
       middlewares:
