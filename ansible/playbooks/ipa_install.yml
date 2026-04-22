@@ -216,7 +216,7 @@
         # false = IPA vérifie que son propre hostname est résolvable par DNS.
         # Ce check passe car /etc/hosts a été configuré en Play 1.
 
-        ipaserver_idstart: 50000
+        ipaserver_idstart: 70000
         # Premier UID/GID pour les users FreeIPA. On part de 50000 pour ne pas
         # entrer en conflit avec les UIDs système (1-999) et les UIDs locaux
         # (1000-49999) sur les VMs jointes au domaine.
