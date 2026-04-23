@@ -26,7 +26,7 @@
 #   qui appliquent un "state: present" idempotent.
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  PLAY 1 : PRÉPARATION SYSTÈME                                               ║
+# ║  PLAY 1 : PRÉPARATION SYSTÈME                                                ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 - name: "Play 1 — Préparer le système pour FreeIPA"
   hosts: ipa_servers
@@ -56,7 +56,7 @@
         regexp: "^{{ ipa_ip }}\\s"
         line: "{{ ipa_ip }} {{ ipa_hostname }} serveur-ipa"
         state: present
-      # Résultat attendu : la ligne "192.168.102.10 serveur-ipa.acme.lan serveur-ipa"
+      # Résultat attendu : la ligne "192.168.102.60 serveur-ipa.acme.lan serveur-ipa"
       # est présente dans /etc/hosts.
 
     - name: "1.2b | S'assurer que 127.0.0.1 ne pointe PAS sur le FQDN"
@@ -169,6 +169,7 @@
     - role: freeipa.ansible_freeipa.ipaserver
       vars:
 
+
         # ── Identité du serveur ───────────────────────────────────────────────
         # ipaserver_domain et ipaserver_realm doivent correspondre exactement
         # aux variables définies plus haut.
@@ -217,7 +218,7 @@
         # Ce check passe car /etc/hosts a été configuré en Play 1.
 
         ipaserver_idstart: 70000
-        # Premier UID/GID pour les users FreeIPA. On part de 50000 pour ne pas
+        # Premier UID/GID pour les users FreeIPA. On part de 70000 pour ne pas
         # entrer en conflit avec les UIDs système (1-999) et les UIDs locaux
         # (1000-49999) sur les VMs jointes au domaine.
 
