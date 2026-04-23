@@ -123,3 +123,26 @@
       # Le cron tourne sur serveur-admin (le nœud de contrôle Ansible),
       # pas sur serveur-ipa. C'est la philosophie retenue pour tous les crons
       # de sauvegarde : un seul endroit centralise les sauvegardes.
+
+    - name: "Résumé de la sauvegarde"
+      ansible.builtin.debug:
+        msg:
+          - "═══════════════════════════════════════════════════"
+          - "  Sauvegarde FreeIPA effectuée avec succès"
+          - "═══════════════════════════════════════════════════"
+          - "  Archive créée : {{ backup_archive.dest | basename }}"
+          - "  Stockée sur serveur-admin : {{ backup_dir_local }}/"
+          - "═══════════════════════════════════════════════════"
+          - "  Lister les sauvegardes :"
+          - "    ls -lh {{ backup_dir_local }}/"
+          - "  Vérifier le cron :"
+          - "    crontab -l | grep ipa"
+          - "  Prochaine exécution automatique : chaque nuit à 02h00"
+          - "═══════════════════════════════════════════════════"
+          - "  Pour restaurer :"
+          - "    ansible-playbook -i inventory/hosts.yml \\"
+          - "      playbooks/ipa_restore.yml \\"
+          - "      --vault-password-file .vault_pass"
+          - "═══════════════════════════════════════════════════"
+      delegate_to: localhost
+      become: false
