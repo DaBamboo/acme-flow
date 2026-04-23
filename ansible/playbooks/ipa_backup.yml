@@ -43,7 +43,7 @@
         state: directory
         mode: '0750'
       delegate_to: localhost
-      become: false
+      become: true
 
     - name: "Lancer ipa-backup (données LDAP + DNS + KRB + CA)"
       ansible.builtin.command:
