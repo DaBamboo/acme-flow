@@ -115,9 +115,11 @@
           -i /opt/ansible/inventory/hosts.yml
           --vault-password-file /opt/ansible/.vault_pass
           >> /var/log/ipa-backup.log 2>&1
-        user:    root
+        user:    admin
         state:   present
-      delegate_to: serveur-admin
+      delegate_to: localhost
+      become: true
+      # Le cron est installé sur serveur-admin (le nœud de contrôle Ansible),
       # Le cron tourne sur serveur-admin (le nœud de contrôle Ansible),
       # pas sur serveur-ipa. C'est la philosophie retenue pour tous les crons
       # de sauvegarde : un seul endroit centralise les sauvegardes.
