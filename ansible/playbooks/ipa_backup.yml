@@ -78,6 +78,7 @@
         src:  "{{ backup_archive.dest }}"
         dest: "{{ backup_dir_local }}/"
         flat: true
+        become: true
       # flat: true → le fichier est copié directement dans backup_dir_local
       # sans créer de sous-dossier par hostname.
 
