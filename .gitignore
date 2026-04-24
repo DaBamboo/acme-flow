@@ -3,6 +3,7 @@
 *.log
 *.retry
 
-# Le vault en clair — on commite uniquement la version chiffrée
-# (si tu veux commiter vault.yml chiffré, retire cette ligne)
-# group_vars/all/vault.yml
+# Dans mon cas, le vault.yml a été créé directement sur serveur-admin
+#Si recréé localement, ne pas oublier de le supprimer avant de commiter
+# ou de lajouter à .gitignore en décommentant la ligne suivante
+#vault.yml

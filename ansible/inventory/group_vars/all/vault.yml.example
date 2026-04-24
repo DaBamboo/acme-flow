@@ -12,21 +12,21 @@
 # Pour voir   : ansible-vault view vault.yml
 
 # ── FreeIPA ────────────────────────────────────────────────────────────────────
-vault_ipa_admin_password: "ChangeMe_IPA_Admin_2025!"
+vault_ipa_admin_password: "ChangeMe_IPA_Admin_2026!"
 # Règles : 8+ chars, au moins une majuscule, un chiffre, un spécial.
 # Ce compte s'appelle "admin" dans FreeIPA. Il est utilisé pour :
 #   - L'interface web IPA (https://serveur-ipa.acme.lan/ipa/ui)
 #   - kinit admin (pour les commandes ipa en CLI)
 #   - Les playbooks Ansible qui manipulent IPA via les modules ansible-freeipa
 
-vault_ipa_dm_password: "ChangeMe_DM_2025!"
+vault_ipa_dm_password: "ChangeMe_DM_2026!"
 # Directory Manager = accès direct à l'annuaire LDAP sans passer par Kerberos.
 # Équivalent du compte "cn=Directory Manager" dans 389-DS.
 # Utilisé uniquement pour les opérations de maintenance avancées ou restauration.
 # NE PAS utiliser ce compte pour les opérations courantes.
 
 # ── Compte de service Authelia ─────────────────────────────────────────────────
-vault_svc_authelia_password: "ChangeMe_Authelia_Svc_2025!"
+vault_svc_authelia_password: "ChangeMe_Authelia_Svc_2026!"
 # Authelia utilise ce compte pour faire ses requêtes LDAP sur l'annuaire.
 # C'est un bind non-anonyme : Authelia envoie ce mot de passe à IPA pour s'identifier,
 # puis interroge l'annuaire pour retrouver l'utilisateur qui se connecte.
